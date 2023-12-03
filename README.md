@@ -8,7 +8,7 @@ The choice of input text prompt plays a critical role in the performance of Visi
 
 
 # Main Results:
-![alt text]()
+![alt text](https://github.com/schowdhury671/APoLLo/blob/main/figs/apollo-table.jpg)
 
 
 
