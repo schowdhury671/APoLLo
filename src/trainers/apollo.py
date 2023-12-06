@@ -18,7 +18,7 @@ from clip.simple_tokenizer import SimpleTokenizer as _Tokenizer
 _tokenizer = _Tokenizer()
 
 
-def load_clip_to_cpu(cfg):
+def load_clip_to_cpu(cfg, keep_org_vis=False):
     backbone_name = cfg.MODEL.BACKBONE.NAME
     url = clip._MODELS[backbone_name]
     model_path = clip._download(url)
@@ -30,11 +30,18 @@ def load_clip_to_cpu(cfg):
 
     except RuntimeError:
         state_dict = torch.load(model_path, map_location="cpu")
-    design_details = {"trainer": 'APOLLO',
-                      "vision_depth": 0,
-                      "language_depth": 0, "vision_ctx": 0,
-                      "language_ctx": 0,
-                      "APOLLO_length": cfg.TRAINER.APOLLO.N_CTX}
+    
+    if keep_org_vis:
+        design_details = {"trainer": 'CoOp',
+                          "vision_depth": 0,
+                          "language_depth": 0, "vision_ctx": 0,
+                          "language_ctx": 0}
+    else:
+        design_details = {"trainer": 'APOLLO',
+                          "vision_depth": 0,
+                          "language_depth": 0, "vision_ctx": 0,
+                          "language_ctx": 0,
+                          "APOLLO_length": cfg.TRAINER.APOLLO.N_CTX}
     model = clip.build_model(state_dict or model.state_dict(), design_details)
 
     return model
@@ -217,10 +224,66 @@ class CustomAdapter(nn.Module):
      
     def forward(self, image_embeds, text_embeds):
         return self.image_adapter(image_embeds, y=text_embeds), self.text_adapter(text_embeds, y=image_embeds)
-        
+
+class co2(nn.Module):
+  def __init__(self, device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
+    super(co2, self).__init__()
+    self.device = device
+
+  def forward(self, x):
+    pass
+
+  def Renyi_alpha_loss(self, y_true, y_pred, alpha=0.5, reduction='mean'):
+
+    if reduction == 'sum':
+      return (1/(alpha - 1))*(((y_true**(alpha))*(y_pred**(1 - alpha))).sum()).log() / y_true.size(0)
+
+    else:
+      return (1/(alpha - 1))*(((y_true**(alpha))*(y_pred**(1 - alpha))).mean()).log() / y_true.size(0)
+
+  def loss_cal(self, x, x_aug, T=0.2, is_consistency=True, T_con=0.04, divergence_type='Jensen-Shannon', renyi_alpha=0.5, loss_weight=2):
+
+    batch_size, _ = x.size()
+    x_abs = x.norm(dim=1)
+    x_aug_abs = x_aug.norm(dim=1)
+
+    sim_matrix = torch.einsum('ik,jk->ij', x, x_aug) / torch.einsum('i,j->ij', x_abs, x_aug_abs)
+    sim_matrix = torch.exp(sim_matrix / T)
+    pos_sim = sim_matrix[range(batch_size), range(batch_size)]
+    loss = pos_sim / (sim_matrix.sum(dim=1) - pos_sim)
+    loss = - torch.log(loss).mean()
+
+    if is_consistency == True:
+        pn = torch.exp((torch.einsum('ik,jk->ij', x, x) / torch.einsum('i,j->ij', x.norm(dim=1), x.norm(dim=1)))/T_con)
+        qn = torch.exp((torch.einsum('ik,jk->ij', x_aug, x) / torch.einsum('i,j->ij', x_aug.norm(dim=1), x.norm(dim=1)))/T_con)
+
+        p = torch.zeros(batch_size-1,batch_size-1).to(self.device)
+        q = torch.zeros(batch_size-1,batch_size-1).to(self.device)
+        sum_p = (pn - torch.diag(pn)*torch.eye(batch_size).to(self.device)).sum(dim=1)
+        sum_q = (qn - torch.diag(qn)*torch.eye(batch_size).to(self.device)).sum(dim=1)
+        pn = pn/sum_p.unsqueeze(-1)
+        qn = qn/sum_q.unsqueeze(-1)
+        for i in range(batch_size-1):
+          p[i,:] = torch.cat((pn[:i,i],pn[i+1:,i]),axis=0)
+          q[i,:] = torch.cat((qn[:i,i],qn[i+1:,i]),axis=0)
+
+        p, q = F.log_softmax(p.permute(1,0)), F.log_softmax(q.permute(1,0))
+
+        if divergence_type == 'Forward KL':
+          loss += loss_weight*nn.KLDivLoss(reduction="batchmean", log_target=True)(p, q)
+        elif divergence_type == 'Reverse KL':
+          loss += loss_weight*nn.KLDivLoss(reduction="batchmean", log_target=True)(q, p)
+        elif divergence_type == 'Symmetric KL':
+          loss += loss_weight*(0.5*nn.KLDivLoss(reduction="batchmean", log_target=True)(p, q) + 0.5*nn.KLDivLoss(reduction="batchmean", log_target=True)(q, p))
+        elif divergence_type == 'Renyi Alpha':
+          loss += loss_weight*self.Renyi_alpha_loss(p.exp(), q.exp(), alpha=renyi_alpha)
+        else: # Jensen Shannon
+          loss += loss_weight*(0.5*nn.KLDivLoss(reduction="batchmean", log_target=True)(p, (p + q)/2) + 0.5*nn.KLDivLoss(reduction="batchmean", log_target=True)(q, (p + q)/2))
+
+    return loss       
 
 class CustomCLIP(nn.Module):
-    def __init__(self, cfg, classnames, clip_model):
+    def __init__(self, cfg, classnames, clip_model, clip_model_org_vis=None):
         super().__init__()
         self.prompt_learner = MultiModalPromptLearner(cfg, classnames, clip_model)
         self.tokenized_prompts = self.prompt_learner.tokenized_prompts
@@ -229,8 +292,11 @@ class CustomCLIP(nn.Module):
         self.logit_scale = clip_model.logit_scale
         self.dtype = clip_model.dtype
         self.adapter = CustomAdapter()
+        self.clip_model_org_vis = clip_model_org_vis
+        self.co2 = co2()
 
-    def forward(self, image, label=None, isAdapter=True):
+    def forward(self, image, label=None, image_aug=None, isAdapter=True):
+        loss_co2 = None
         tokenized_prompts = self.tokenized_prompts
         logit_scale = self.logit_scale.exp()
 
@@ -240,15 +306,20 @@ class CustomCLIP(nn.Module):
         
         if isAdapter:
             image_features, text_features = self.adapter(image_features, text_features)
+            
+        if self.clip_model_org_vis is not None and image_aug is not None:
+            image_features_aug = self.clip_model_org_vis.encode_image(image_aug)
+            loss_co2 = self.co2(image_features, image_features_aug)
 
         image_features = image_features / image_features.norm(dim=-1, keepdim=True)
         text_features = text_features / text_features.norm(dim=-1, keepdim=True)
         logits = logit_scale * image_features @ text_features.t()
-        
-        
 
         if self.prompt_learner.training:
-            return F.cross_entropy(logits, label)
+            if loss_co2 is not None:
+                return F.cross_entropy(logits, label) + loss_co2
+            else:
+                return F.cross_entropy(logits, label)
 
         return logits
 
@@ -268,13 +339,15 @@ class APOLLO(TrainerX):
 
         print(f"Loading CLIP (backbone: {cfg.MODEL.BACKBONE.NAME})")
         clip_model = load_clip_to_cpu(cfg)
+        clip_model_org_vis = load_clip_to_cpu(cfg, keep_org_vis=True)
 
         if cfg.TRAINER.APOLLO.PREC == "fp32" or cfg.TRAINER.APOLLO.PREC == "amp":
             # CLIP's default precision is fp16
             clip_model.float()
+            clip_model_org_vis.float()
 
         print("Building custom CLIP")
-        self.model = CustomCLIP(cfg, classnames, clip_model)
+        self.model = CustomCLIP(cfg, classnames, clip_model, clip_model_org_vis)
 
         print("Turning off gradients in both the image and the text encoder")
         name_to_update = "prompt_learner"
@@ -312,8 +385,13 @@ class APOLLO(TrainerX):
             print(f"Multiple GPUs detected (n_gpus={device_count}), use all of them!")
             self.model = nn.DataParallel(self.model)
 
-    def forward_backward(self, batch):
-        image, label = self.parse_batch_train(batch)
+    def forward_backward(self, batch, is_img_transform=True):
+        
+        if is_img_transform:
+            image, label, transformed_img = self.parse_batch_train(batch, is_img_transform=is_img_transform)
+        else:
+            image, label = self.parse_batch_train(batch, is_img_transform=False)
+            transformed_img = None
 
         model = self.model
         optim = self.optim
@@ -322,13 +400,13 @@ class APOLLO(TrainerX):
         prec = self.cfg.TRAINER.APOLLO.PREC
         if prec == "amp":
             with autocast():
-                loss = model(image, label)
+                loss = model(image, label, image_aug=transformed_img)
             optim.zero_grad()
             scaler.scale(loss).backward()
             scaler.step(optim)
             scaler.update()
         else:
-            loss = model(image, label)
+            loss = model(image, label, image_aug=transformed_img)
             optim.zero_grad()
             loss.backward()
             optim.step()
@@ -340,12 +418,18 @@ class APOLLO(TrainerX):
 
         return loss_summary
 
-    def parse_batch_train(self, batch):
+    def parse_batch_train(self, batch, is_img_transform=False):
         input = batch["img"]
         label = batch["label"]
+        if is_img_transform:
+            transformed_img = self.transform_img(input)
+            transformed_img = transformed_img.to(self.device)
         input = input.to(self.device)
         label = label.to(self.device)
-        return input, label
+        if is_img_transform:
+            return input, label, transformed_img
+        else:
+            return input, label
 
     def load_model(self, directory, epoch=None):
         if not directory:
