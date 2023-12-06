@@ -16,8 +16,12 @@ The choice of input text prompt plays a critical role in the performance of Visi
 If you find this article useful in your research, please consider citing:
 
 ```
-
-
+@article{chowdhury2023apollo,
+  title={APoLLo: Unified Adapter and Prompt Learning for Vision Language Models},
+  author={Chowdhury, Sanjoy and Nag, Sayan and Manocha, Dinesh},
+  journal={arXiv preprint arXiv:2312.01564},
+  year={2023}
+}
 ```
 
 
