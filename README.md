@@ -16,11 +16,22 @@ The choice of input text prompt plays a critical role in the performance of Visi
 If you find this article useful in your research, please consider citing:
 
 ```
-@article{chowdhury2023apollo,
-  title={APoLLo: Unified Adapter and Prompt Learning for Vision Language Models},
-  author={Chowdhury, Sanjoy and Nag, Sayan and Manocha, Dinesh},
-  journal={arXiv preprint arXiv:2312.01564},
-  year={2023}
+@inproceedings{chowdhury-etal-2023-apollo,
+    title = "{AP}o{LL}o : Unified Adapter and Prompt Learning for Vision Language Models",
+    author = "Chowdhury, Sanjoy  and
+      Nag, Sayan  and
+      Manocha, Dinesh",
+    editor = "Bouamor, Houda  and
+      Pino, Juan  and
+      Bali, Kalika",
+    booktitle = "Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing",
+    month = dec,
+    year = "2023",
+    address = "Singapore",
+    publisher = "Association for Computational Linguistics",
+    url = "https://aclanthology.org/2023.emnlp-main.629",
+    pages = "10173--10187",
+    abstract = "The choice of input text prompt plays a critical role in the performance of Vision-Language Pretrained (VLP) models such as CLIP. We present APoLLo, a unified multi-modal approach that combines Adapter and Prompt learning for Vision-Language models. Our method is designed to substantially improve the generalization capabilities of VLP models when they are fine-tuned in a few-shot setting. We introduce trainable cross-attention-based adapter layers in conjunction with vision and language encoders to strengthen the alignment between the two modalities. We enforce consistency between the respective encoder branches (receiving augmented inputs) to prevent overfitting in downstream tasks. Our method is evaluated on three representative tasks: generalization to novel classes, cross-dataset evaluation, and unseen domain shifts. In practice, APoLLo achieves a relative gain up to 6.03{\%} over MaPLe (SOTA) on novel classes for 10 diverse image recognition datasets.",
 }
 ```
 
